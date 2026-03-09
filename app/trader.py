@@ -631,9 +631,20 @@ def _render_binance_section(binance: Dict[str, Any]) -> str:
     ts = html_escape(str(binance.get("fetched_at", "")))
     errors = binance.get("errors") or {}
     assets = binance.get("assets") or {}
+    fetch_error = binance.get("fetch_error", False)
 
     rows = ""
     for asset in ("BTC", "ETH", "SOL"):
+        if fetch_error:
+            rows += (
+                f"<tr>"
+                f"<td>{asset}</td>"
+                f"<td style='text-align:right' class='muted'>—</td>"
+                f"<td style='text-align:right' class='muted'>—</td>"
+                f"<td style='text-align:right' class='muted'>—</td>"
+                f"</tr>"
+            )
+            continue
         if asset not in assets:
             err = errors.get(asset, "no data")
             rows += f"<tr><td>{asset}</td><td colspan='3' class='muted'>{html_escape(err)}</td></tr>"
@@ -652,8 +663,21 @@ def _render_binance_section(binance: Dict[str, Any]) -> str:
             f"</tr>"
         )
 
+    if fetch_error:
+        subtitle = (
+            f"<div class='muted' style='color:#856404'>"
+            f"⚠ Binance unavailable at {ts} — trading on internal model only"
+            f"</div>"
+        )
+    else:
+        subtitle = (
+            f"<div class='muted'>Fetched: {ts} | "
+            f"blend weight: {SIGNAL_CFG.binance_blend_weight:.0%} Binance / "
+            f"{1-SIGNAL_CFG.binance_blend_weight:.0%} internal</div>"
+        )
+
     return f"""
-<div class='muted'>Fetched: {ts} | blend weight: {SIGNAL_CFG.binance_blend_weight:.0%} Binance / {1-SIGNAL_CFG.binance_blend_weight:.0%} internal</div>
+{subtitle}
 <table>
   <thead><tr><th>Asset</th><th style='text-align:right'>Spot price</th><th style='text-align:right'>2h return</th><th style='text-align:right'>2h vol (σ)</th></tr></thead>
   <tbody>{rows}</tbody>
@@ -1216,6 +1240,7 @@ def main() -> int:
     state["mi_stats_last_run"] = mi_stats
 
     # Persist Binance snapshot summary for the dashboard.
+    # Always update the key so the dashboard reflects the current cycle's status.
     if binance_snap is not None:
         state["binance_last_run"] = {
             "fetched_at": time.strftime(
@@ -1231,6 +1256,15 @@ def main() -> int:
                 for asset, sn in binance_snap.assets.items()
             },
             "errors": binance_snap.errors,
+        }
+    else:
+        # Binance unavailable this cycle — write an explicit error marker so the
+        # dashboard shows a clear "unavailable" state rather than stale data.
+        state["binance_last_run"] = {
+            "fetch_error": True,
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time())),
+            "assets": {},
+            "errors": {},
         }
 
     _prune_state(state)
