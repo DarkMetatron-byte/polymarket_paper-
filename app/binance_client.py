@@ -68,7 +68,10 @@ class BinanceClient:
 
         API weight: 4 (multi-symbol form).
         """
-        params = {"symbols": json.dumps(symbols)}
+        # Binance expects the `symbols` query parameter as a JSON array string.
+        # Important: no spaces inside the JSON, otherwise some servers reject it.
+        # Example: symbols=["BTCUSDT","ETHUSDT","SOLUSDT"]
+        params = {"symbols": json.dumps(symbols, separators=(",", ":"))}
         data = self._get("/api/v3/ticker/price", params=params)
 
         if not isinstance(data, list):
