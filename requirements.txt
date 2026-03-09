@@ -1,0 +1,3 @@
+# If you run this inside the original OpenClaw container, dependencies may already exist.
+# Keep requirements minimal; add more as you evolve the project locally.
+

@@ -1,0 +1,6 @@
+version: 1
+project:
+  name: polymarket-engine
+notes:
+  - Exported from OpenClaw workspace.
+  - Start with app/main.py

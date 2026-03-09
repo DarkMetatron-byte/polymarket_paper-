@@ -1,0 +1,17 @@
+# runtime artifacts
+data/
+logs/
+__pycache__/
+.env
+
+# python
+.venv/
+*.pyc
+
+# local state/caches that existed in the original workspace
+paper_state.json
+markets_cache.json
+daemon.lock
+*.log
+
+dashboard.html
