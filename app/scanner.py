@@ -4,9 +4,20 @@ Fetches active markets from Polymarket Gamma API, filters for crypto "Up or Down
 prints a compact pricing view, and writes markets_cache.json.
 
 Usage:
-  python3 discover_markets.py
+  python3 scanner.py
+
+Env vars:
+  PM_DATA_DIR    Base directory for data files (default: directory of this file)
+  PM_CACHE_PATH  Override cache path (default: <PM_DATA_DIR>/markets_cache.json)
 """
 
+from __future__ import annotations
+
+import json
+import os
+import time
+
+from config import CACHE_PATH
 from polymarket_client import (
     DEFAULT_BASE_URL,
     GammaClient,
@@ -14,15 +25,13 @@ from polymarket_client import (
     summarize_prices,
 )
 
-import json
-import time
-
 
 def main() -> int:
     c = GammaClient()
     markets = discover_active_crypto_updown_markets(c, pages=5, page_size=100)
 
-    with open("markets_cache.json", "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(os.path.abspath(CACHE_PATH)), exist_ok=True)
+    with open(CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -39,7 +48,7 @@ def main() -> int:
         print(json.dumps(row, ensure_ascii=False))
 
     print(f"\nFound {len(markets)} candidate crypto Up/Down markets.")
-    print("Wrote markets_cache.json")
+    print(f"Wrote {CACHE_PATH}")
     return 0
 
 

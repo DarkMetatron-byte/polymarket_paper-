@@ -1,0 +1,43 @@
+# systemd service for Polymarket Paper Trader
+#
+# Installation (as root):
+#   useradd -r -s /sbin/nologin polymarket
+#   mkdir -p /opt/polymarket /var/lib/polymarket
+#   chown polymarket:polymarket /opt/polymarket /var/lib/polymarket
+#   cp -r . /opt/polymarket/
+#   cd /opt/polymarket && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   cp scripts/polymarket.service /etc/systemd/system/
+#   cp scripts/polymarket.timer   /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now polymarket.timer
+#
+# Check status:
+#   systemctl status polymarket.timer
+#   journalctl -u polymarket.service -f
+
+[Unit]
+Description=Polymarket Paper Trader (one-shot cycle)
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/your-username/polymarket-paper
+
+[Service]
+Type=oneshot
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket
+ExecStart=/opt/polymarket/.venv/bin/python /opt/polymarket/app/main.py
+StandardOutput=journal
+StandardError=journal
+
+# Runtime data directory
+Environment=PM_DATA_DIR=/var/lib/polymarket
+
+# Security hardening
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/polymarket
+
+[Install]
+WantedBy=multi-user.target
