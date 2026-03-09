@@ -1,0 +1,18 @@
+# systemd timer — runs polymarket.service every 15 minutes.
+#
+# See polymarket.service for installation instructions.
+
+[Unit]
+Description=Run Polymarket Paper Trader every 15 minutes
+Requires=polymarket.service
+
+[Timer]
+# Wait 2 minutes after boot before first run
+OnBootSec=2min
+# Then repeat every 15 minutes
+OnUnitActiveSec=15min
+# Catch up missed runs if the VPS was offline
+Persistent=true
+
+[Install]
+WantedBy=timers.target

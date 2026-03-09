@@ -1,3 +1,9 @@
-# Minimal runtime dependencies.
-# Standard library only at the moment.
+# Polymarket Paper Trader — runtime dependencies
+#
+# Python 3.10+ required (uses X | Y union type hints, PEP 604).
+# Standard library only at runtime; no third-party packages needed.
+#
+# Development / testing:
+#   pip install pytest
+#   pytest tests/
 
