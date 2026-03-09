@@ -52,7 +52,7 @@ TRADEABLE_CLASSES: frozenset[MarketClass] = frozenset({
 })
 
 # Human-readable labels for the dashboard.
-CLASS_LABELS: Dict[str, str] = {
+CLASS_LABELS: Dict[MarketClass, str] = {
     MarketClass.HIGH_QUALITY: "HIGH",
     MarketClass.NORMAL:       "NORMAL",
     MarketClass.LOW_QUALITY:  "LOW",
@@ -70,7 +70,9 @@ class MarketIntelConfig:
     spread_excellent: float = 0.005   # <= this  → spread_score = 1.0
     spread_max: float = 0.030         # >= this  → spread_score = 0.0  (linear between)
 
-    # Liquidity thresholds (min of bestBidSize, bestAskSize in USD notional)
+    # Liquidity thresholds (min of bestBidSize, bestAskSize).
+    # NOTE: Polymarket reports these in outcome-share units, not USD notional.
+    # Thresholds are calibrated empirically; revisit if the API changes.
     liquidity_excellent: float = 200.0   # >= this → liq_score = 1.0
     liquidity_min: float = 10.0          # <= this → liq_score = 0.0  (linear between)
 
@@ -88,7 +90,7 @@ class MarketIntelConfig:
     price_penalty_lo: float = 0.15       # soft-zone lower boundary
     price_penalty_hi: float = 0.85       # soft-zone upper boundary
 
-    # Component weights — must sum to 1.0 (enforced at runtime)
+    # Component weights — should sum to > 0 (normalised at runtime; aim for 1.0)
     weight_spread:    float = 0.30
     weight_liquidity: float = 0.25
     weight_expiry:    float = 0.25
@@ -98,6 +100,13 @@ class MarketIntelConfig:
     threshold_high:   float = 75.0
     threshold_normal: float = 50.0
     threshold_low:    float = 30.0
+
+    # Hard K.O. thresholds — block a market regardless of the weighted score.
+    # Any single trip here sets hard_blocked=True and skips the normal pipeline.
+    hard_max_spread:  float = 0.05    # spread >= this  → immediate block
+    hard_min_price:   float = 0.05    # mid_price <= this → immediate block
+    hard_max_price:   float = 0.95    # mid_price >= this → immediate block
+    hard_min_hours:   float = 12.0    # hours until expiry < this → immediate block
 
 
 # Singleton default config — import and use directly.
@@ -109,16 +118,25 @@ DEFAULT_CONFIG = MarketIntelConfig()
 @dataclass
 class MarketIntelResult:
     """Full result of a single market intelligence evaluation."""
-    liquidity_score:      float        # 0..1
-    spread_score:         float        # 0..1
-    time_to_expiry_score: float        # 0..1
-    price_extreme_penalty: float       # 0..1  (1 = no penalty)
-    market_quality_score: float        # 0..100 (weighted combination)
-    classification:       MarketClass
+    liquidity_score:       float        # 0..1
+    spread_score:          float        # 0..1
+    time_to_expiry_score:  float        # 0..1
+    price_extreme_penalty: float        # 0..1  (1 = no penalty)
+    market_quality_score:  float        # 0..100 (weighted combination)
+    classification:        MarketClass
+
+    # Weakest scoring component — useful for dashboard & debugging.
+    # Values: "wide_spread" | "thin_liquidity" | "near_expiry" | "price_extreme"
+    primary_block_reason:  Optional[str] = None
+
+    # Hard K.O. — set when any single hard threshold is breached.
+    # A hard-blocked market is never tradeable, regardless of weighted score.
+    hard_blocked:          bool = False
+    hard_block_reason:     Optional[str] = None  # e.g. "hard_wide_spread"
 
     def is_tradeable(self) -> bool:
         """True if this market is allowed to enter the trading pipeline."""
-        return self.classification in TRADEABLE_CLASSES
+        return (not self.hard_blocked) and (self.classification in TRADEABLE_CLASSES)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialisable representation for state files and dashboard."""
@@ -129,6 +147,9 @@ class MarketIntelResult:
             "price_extreme_penalty": round(self.price_extreme_penalty, 4),
             "market_quality_score":  round(self.market_quality_score, 2),
             "classification":        self.classification.value,
+            "primary_block_reason":  self.primary_block_reason,
+            "hard_blocked":          self.hard_blocked,
+            "hard_block_reason":     self.hard_block_reason,
         }
 
 
@@ -146,7 +167,14 @@ def _parse_float(x: Any) -> Optional[float]:
 
 
 def _parse_end_epoch(m: Dict[str, Any]) -> Optional[float]:
-    """Parse market end date → UTC epoch seconds. Returns None if unavailable."""
+    """Parse market end date → UTC epoch seconds. Returns None if unavailable.
+
+    Handling:
+    - Numeric value: returned as-is (assumed to be epoch seconds already).
+    - "...Z" suffix: parsed as exact UTC (correct).
+    - Other strings: first 19 chars treated as UTC (best-effort heuristic).
+      Timezone offsets like +01:00 and sub-second parts are silently ignored.
+    """
     s = m.get("endDate") or m.get("end_date") or m.get("end")
     if not s:
         return None
@@ -340,6 +368,43 @@ def compute_market_intel(
     else:
         cls = MarketClass.AVOID
 
+    # Primary block reason — the weakest-scoring component.
+    # Always computed: useful for debugging even on tradeable markets.
+    _component_scores = {
+        "wide_spread":    spread_sc,
+        "thin_liquidity": liq_score,
+        "near_expiry":    expiry_sc,
+        "price_extreme":  price_pen,
+    }
+    primary_block_reason: Optional[str] = min(
+        _component_scores, key=lambda k: _component_scores[k]
+    )
+
+    # Hard K.O. checks — block regardless of weighted score.
+    # Checked in order of most-likely occurrence; first match wins.
+    hard_blocked = False
+    hard_block_reason: Optional[str] = None
+
+    bb = _parse_float(market.get("bestBid"))
+    ba = _parse_float(market.get("bestAsk"))
+    if bb is not None and ba is not None and (ba - bb) >= mi_cfg.hard_max_spread:
+        hard_blocked = True
+        hard_block_reason = "hard_wide_spread"
+
+    if not hard_blocked:
+        p = float(mid_price)
+        if p <= mi_cfg.hard_min_price or p >= mi_cfg.hard_max_price:
+            hard_blocked = True
+            hard_block_reason = "hard_price_extreme"
+
+    if not hard_blocked:
+        end_epoch = _parse_end_epoch(market)
+        if end_epoch is not None:
+            hours_left = (end_epoch - time.time()) / 3600.0
+            if hours_left < mi_cfg.hard_min_hours:
+                hard_blocked = True
+                hard_block_reason = "hard_near_expiry"
+
     return MarketIntelResult(
         liquidity_score=liq_score,
         spread_score=spread_sc,
@@ -347,4 +412,7 @@ def compute_market_intel(
         price_extreme_penalty=price_pen,
         market_quality_score=quality,
         classification=cls,
+        primary_block_reason=primary_block_reason,
+        hard_blocked=hard_blocked,
+        hard_block_reason=hard_block_reason,
     )
