@@ -16,10 +16,10 @@ The trader container workspace is at BASE (below).  The dashboard container
 serves a *different* bind-mount.  To bridge the two we mount that runtime
 directory into the trader container and copy files after each cycle.
 
-  docker-compose volume for the trader service:
-    /docker/openclaw-rrhx/data/polymarket-engine/runtime:/data/runtime
+  The trader service already mounts ./data:/data which includes the
+  runtime directory at /data/polymarket-engine/runtime.
 
-  RUNTIME_DIR (below) = /data/runtime   (inside the trader container)
+  RUNTIME_DIR (below) = /data/polymarket-engine/runtime  (inside trader container)
 """
 
 from __future__ import annotations
@@ -40,9 +40,8 @@ FAST_INTERVAL = 120    # 2 minutes when positions are open
 LOCKFILE = BASE / "daemon.lock"
 
 # Dashboard webserver container serves from this directory.
-# Mount it into the trader container via docker-compose, e.g.:
-#   /docker/openclaw-rrhx/data/polymarket-engine/runtime:/data/runtime
-RUNTIME_DIR = Path(os.environ.get("PM_RUNTIME_DIR", "/data/runtime"))
+# Already accessible because the trader mounts ./data:/data.
+RUNTIME_DIR = Path(os.environ.get("PM_RUNTIME_DIR", "/data/polymarket-engine/runtime"))
 
 # Files to copy to the runtime directory after each cycle.
 _PUBLISH_FILES = ("dashboard.html", "paper_state.json", "markets_cache.json")
