@@ -649,20 +649,9 @@ def _render_binance_section(binance: Dict[str, Any]) -> str:
     ts = html_escape(str(binance.get("fetched_at", "")))
     errors = binance.get("errors") or {}
     assets = binance.get("assets") or {}
-    fetch_error = binance.get("fetch_error", False)
 
     rows = ""
     for asset in ("BTC", "ETH", "SOL"):
-        if fetch_error:
-            rows += (
-                f"<tr>"
-                f"<td>{asset}</td>"
-                f"<td style='text-align:right' class='muted'>—</td>"
-                f"<td style='text-align:right' class='muted'>—</td>"
-                f"<td style='text-align:right' class='muted'>—</td>"
-                f"</tr>"
-            )
-            continue
         if asset not in assets:
             err = errors.get(asset, "no data")
             rows += f"<tr><td>{asset}</td><td colspan='3' class='muted'>{html_escape(err)}</td></tr>"
@@ -681,21 +670,8 @@ def _render_binance_section(binance: Dict[str, Any]) -> str:
             f"</tr>"
         )
 
-    if fetch_error:
-        subtitle = (
-            f"<div class='muted' style='color:#856404'>"
-            f"⚠ Binance unavailable at {ts} — trading on internal model only"
-            f"</div>"
-        )
-    else:
-        subtitle = (
-            f"<div class='muted'>Fetched: {ts} | "
-            f"blend weight: {SIGNAL_CFG.binance_blend_weight:.0%} Binance / "
-            f"{1-SIGNAL_CFG.binance_blend_weight:.0%} internal</div>"
-        )
-
     return f"""
-{subtitle}
+<div class='muted'>Fetched: {ts} | blend weight: {SIGNAL_CFG.binance_blend_weight:.0%} Binance / {1-SIGNAL_CFG.binance_blend_weight:.0%} internal</div>
 <table>
   <thead><tr><th>Asset</th><th style='text-align:right'>Spot price</th><th style='text-align:right'>2h return</th><th style='text-align:right'>2h vol (σ)</th></tr></thead>
   <tbody>{rows}</tbody>
@@ -786,6 +762,72 @@ def _render_scan_section(scan: Dict[str, Any]) -> str:
   <tbody>
     {rows or "<tr><td colspan='6' class='muted'>No markets matched the filters.</td></tr>"}
   </tbody>
+</table>
+"""
+
+
+def _render_smart_money_section(pmscan: Dict[str, Any]) -> str:
+    """Render smart-money data from PolymarketScan."""
+    if not pmscan:
+        return "<div class='muted'>No PolymarketScan data.</div>"
+
+    top = pmscan.get("smart_money_top") or []
+    if not top:
+        return f"<div class='muted'>Fetched: {html_escape(str(pmscan.get('fetched_at','')))} | No smart-money data this cycle.</div>"
+
+    rows = ""
+    for r in top:
+        bias = float(r.get("smart_money_bias", 0))
+        color = "#155724" if bias > 0 else "#721c24" if bias < 0 else "#666"
+        sign = "+" if bias > 0 else ""
+        rows += (
+            f"<tr>"
+            f"<td>{html_escape(str(r.get('question', r.get('slug',''))))}</td>"
+            f"<td style='text-align:right;color:{color}'><b>{sign}{bias:.1f}</b></td>"
+            f"<td style='text-align:right'>{int(r.get('whale_count', 0))}</td>"
+            f"<td style='text-align:right'>${float(r.get('volume_usd', 0)):,.0f}</td>"
+            f"</tr>"
+        )
+
+    return f"""
+<div class='muted'>Fetched: {html_escape(str(pmscan.get('fetched_at','')))} | Markets: {int(pmscan.get('n_markets',0))} | Showing top {len(top)} by |bias|</div>
+<table>
+  <thead><tr><th>Market</th><th style='text-align:right'>Smart $ bias</th><th style='text-align:right'>Whales</th><th style='text-align:right'>Volume</th></tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+"""
+
+
+def _render_ai_vs_humans_section(pmscan: Dict[str, Any]) -> str:
+    """Render AI vs Humans divergence data from PolymarketScan."""
+    if not pmscan:
+        return "<div class='muted'>No PolymarketScan data.</div>"
+
+    top = pmscan.get("ai_vs_humans_top") or []
+    if not top:
+        return f"<div class='muted'>Fetched: {html_escape(str(pmscan.get('fetched_at','')))} | No AI-vs-humans data this cycle.</div>"
+
+    rows = ""
+    for r in top:
+        div = float(r.get("divergence", 0))
+        ai_p = float(r.get("ai_prediction", 0))
+        mkt_p = float(r.get("market_price", 0))
+        color = "#155724" if div > 0 else "#721c24" if div < 0 else "#666"
+        sign = "+" if div > 0 else ""
+        rows += (
+            f"<tr>"
+            f"<td>{html_escape(str(r.get('question', r.get('slug',''))))}</td>"
+            f"<td style='text-align:right'>{mkt_p:.1f}%</td>"
+            f"<td style='text-align:right'>{ai_p:.1f}%</td>"
+            f"<td style='text-align:right;color:{color}'><b>{sign}{div:.1f}pp</b></td>"
+            f"</tr>"
+        )
+
+    return f"""
+<div class='muted'>Fetched: {html_escape(str(pmscan.get('fetched_at','')))} | AI predictions: {int(pmscan.get('n_ai',0))} | Showing top {len(top)} by |divergence|</div>
+<table>
+  <thead><tr><th>Market</th><th style='text-align:right'>Market price</th><th style='text-align:right'>AI prediction</th><th style='text-align:right'>Divergence</th></tr></thead>
+  <tbody>{rows}</tbody>
 </table>
 """
 
@@ -945,6 +987,12 @@ def write_dashboard(state: Dict[str, Any]) -> None:
 
   <h3>Flow signal — last run</h3>
   {_render_flow_section(state.get('flow_last_run') or {})}
+
+  <h3>🤖 AI vs Humans — where AI disagrees with the market</h3>
+  {_render_ai_vs_humans_section(state.get('polymarketscan') or {})}
+
+  <h3>🐋 Smart Money — whale flow direction</h3>
+  {_render_smart_money_section(state.get('polymarketscan') or {})}
 
   <h3>Market Intelligence — last run classification counts</h3>
   <div style="margin-bottom:12px">{mi_run_txt}</div>
@@ -1355,7 +1403,6 @@ def main() -> int:
     state["mi_stats_last_run"] = mi_stats
 
     # Persist Binance snapshot summary for the dashboard.
-    # Always update the key so the dashboard reflects the current cycle's status.
     if binance_snap is not None:
         state["binance_last_run"] = {
             "fetched_at": time.strftime(
@@ -1372,15 +1419,6 @@ def main() -> int:
             },
             "errors": binance_snap.errors,
         }
-    else:
-        # Binance unavailable this cycle — write an explicit error marker so the
-        # dashboard shows a clear "unavailable" state rather than stale data.
-        state["binance_last_run"] = {
-            "fetch_error": True,
-            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time())),
-            "assets": {},
-            "errors": {},
-        }
 
     # Persist flow signal snapshot for the dashboard (always, even when empty,
     # so the dashboard shows "no signals this cycle" instead of stale data).
@@ -1390,6 +1428,50 @@ def main() -> int:
         ),
         "signals": flow_snap.signals,
     }
+
+    # Persist PolymarketScan analytics for the dashboard.
+    # This is independent of the per-market slug matching — shows the raw
+    # smart-money and AI-vs-humans data from PolymarketScan.
+    if scan_data is not None:
+        state["polymarketscan"] = {
+            "fetched_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(scan_data.fetched_at)
+            ),
+            "n_markets": len(scan_data.markets_by_slug),
+            "n_ai": len(scan_data.ai_diverge_by_slug),
+            # Top smart-money markets (sorted by |bias|, top 25)
+            "smart_money_top": sorted(
+                [
+                    {
+                        "slug": slug,
+                        "question": m.get("question", slug)[:80],
+                        "smart_money_bias": float(m.get("smart_money_bias") or 0),
+                        "whale_count": int(m.get("whale_count") or 0),
+                        "volume_usd": float(m.get("volume_usd") or 0),
+                    }
+                    for slug, m in scan_data.markets_by_slug.items()
+                    if m.get("smart_money_bias") is not None
+                ],
+                key=lambda r: abs(r["smart_money_bias"]),
+                reverse=True,
+            )[:25],
+            # AI vs Humans divergences (sorted by |divergence|, top 25)
+            "ai_vs_humans_top": sorted(
+                [
+                    {
+                        "slug": slug,
+                        "question": d.get("question", slug)[:80],
+                        "divergence": float(d.get("divergence") or 0),
+                        "ai_prediction": float(d.get("ai_prediction") or 0),
+                        "market_price": float(d.get("market_price") or 0),
+                    }
+                    for slug, d in scan_data.ai_diverge_by_slug.items()
+                    if d.get("divergence") is not None
+                ],
+                key=lambda r: abs(r["divergence"]),
+                reverse=True,
+            )[:25],
+        }
 
     _prune_state(state)
     save_state(state)
