@@ -66,7 +66,7 @@ from mispricing_engine import (
 
 # Phase-1 centralized trader config (single source of truth for trading thresholds)
 TRADER_CFG: Dict[str, Any] = {
-    "EDGE_ENTER": 0.10,
+    "EDGE_ENTER": 0.05,
     "EDGE_EXIT": 0.01,
     "EDGE_ADVERSE_EXIT": -0.02,
     "MAX_SPREAD": 0.03,
@@ -91,6 +91,11 @@ TRADER_CFG: Dict[str, Any] = {
     "MAX_POSITIONS_PER_ASSET": 1,   # max positions in same underlying (BTC/ETH/SOL)
     "MAX_ENTRIES_PER_CYCLE":   2,   # max new entries opened per 15-min cycle
 
+    # Execution cost modelling (spread + fee deduction)
+    "FEE_PER_SIDE":           0.005,  # estimated per-side fee (~0.5% covers Polymarket taker cost)
+    "SAFETY_MARGIN":          0.01,   # extra buffer on top of execution costs
+    "MAX_RELATIVE_SPREAD":    0.05,   # 5 % – skip markets where spread / mid > this
+
     # Circuit breaker thresholds (expressed as multiples of MAX_USD_PER_TRADE
     # so they scale automatically when you change position size)
     "CB_MAX_DRAWDOWN_MULT":   5.0,   # trip if total P/L < -(5 × trade_size)
@@ -99,7 +104,7 @@ TRADER_CFG: Dict[str, Any] = {
 }
 
 CFG = MispricingConfig(
-    sma_window=8,
+    sma_window=5,
     momentum_k=0.5,
     edge_enter=float(TRADER_CFG["EDGE_ENTER"]),
     edge_exit=float(TRADER_CFG["EDGE_EXIT"]),
@@ -115,19 +120,29 @@ from signal_engine import BinanceSnapshot, SignalConfig, blend_p_hat, compute_bi
 
 SIGNAL_CFG = SignalConfig()
 
+# Polymarket flow / whale signal layer.
+from whale_signal import CLOBClient, FlowConfig, FlowResult, FlowSnapshot, ScanData, compute_flow_signal, fetch_scan_data
 
-_ASSET_KW: Dict[str, List[str]] = {
-    "BTC": ["bitcoin", "btc"],
-    "ETH": ["ethereum", "eth"],
-    "SOL": ["solana", "sol"],
+FLOW_CFG = FlowConfig()
+
+
+import re as _re
+
+# Word-boundary regex per asset — avoids false positives like
+# "whether" → "eth", "resolution" → "sol".
+# Mirrors the fix in polymarket_client._CRYPTO_RE.
+_ASSET_RE: Dict[str, _re.Pattern] = {
+    "BTC": _re.compile(r"\b(?:bitcoin|btc)\b", _re.IGNORECASE),
+    "ETH": _re.compile(r"\b(?:ethereum|eth)\b", _re.IGNORECASE),
+    "SOL": _re.compile(r"\b(?:solana|sol)\b", _re.IGNORECASE),
 }
 
 
 def _detect_asset(market: Dict[str, Any]) -> Optional[str]:
     """Return the underlying asset key (BTC/ETH/SOL) for a market, or None."""
-    text = " ".join(str(market.get(k) or "") for k in ("question", "title", "slug")).lower()
-    for asset, keywords in _ASSET_KW.items():
-        if any(kw in text for kw in keywords):
+    text = " ".join(str(market.get(k) or "") for k in ("question", "title", "slug"))
+    for asset, pattern in _ASSET_RE.items():
+        if pattern.search(text):
             return asset
     return None
 
@@ -548,7 +563,10 @@ def close_position(
         proceeds = pos["shares"] * price
         recorded_exit_price = price
 
-    pnl = proceeds - pos["usd"]
+    # Deduct estimated round-trip fees (entry + exit side)
+    fee_rate = float(TRADER_CFG.get("FEE_PER_SIDE", 0.0))
+    fee_cost = pos["usd"] * fee_rate + proceeds * fee_rate
+    pnl = proceeds - pos["usd"] - fee_cost
 
     exit_time = utc_now()
     hold_mins = None
@@ -680,6 +698,52 @@ def _render_binance_section(binance: Dict[str, Any]) -> str:
 {subtitle}
 <table>
   <thead><tr><th>Asset</th><th style='text-align:right'>Spot price</th><th style='text-align:right'>2h return</th><th style='text-align:right'>2h vol (σ)</th></tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+"""
+
+
+def _render_flow_section(flow: Dict[str, Any]) -> str:
+    """Render the flow/whale signal dashboard section."""
+    if not flow:
+        return "<div class='muted'>No flow data yet.</div>"
+
+    signals = flow.get("signals") or {}
+    ts = html_escape(str(flow.get("fetched_at", "")))
+
+    if not signals:
+        return f"<div class='muted'>Fetched: {ts} | No markets had flow signal this cycle.</div>"
+
+    rows = ""
+    for mid, sig in sorted(signals.items(), key=lambda kv: abs(float(kv[1].get("flow_adj", 0))), reverse=True):
+        adj = float(sig.get("flow_adj", 0.0))
+        tob = sig.get("tob_imbalance")
+        clob = sig.get("clob_imbalance")
+        sm = sig.get("smart_money")
+        ai = sig.get("ai_diverge")
+        color = "#155724" if adj > 0 else "#721c24" if adj < 0 else "#666"
+        sign = "+" if adj > 0 else ""
+
+        def _td(v: Any, fmt: str = ".3f") -> str:
+            if v is None:
+                return "<td class='muted'>\u2014</td>"
+            return f"<td style='text-align:right'>{float(v):{fmt}}</td>"
+
+        rows += (
+            f"<tr>"
+            f"<td class='muted'>{html_escape(str(mid)[:16])}</td>"
+            f"<td style='text-align:right;color:{color}'><b>{sign}{adj:.4f}</b></td>"
+            f"{_td(tob)}"
+            f"{_td(clob)}"
+            f"{_td(sm)}"
+            f"{_td(ai)}"
+            f"</tr>"
+        )
+
+    return f"""
+<div class='muted'>Fetched: {ts} | Markets with signal: {len(signals)} | max adj: ±{FLOW_CFG.max_flow_adj:.3f}</div>
+<table>
+  <thead><tr><th>Market</th><th style='text-align:right'>Flow adj</th><th style='text-align:right'>Book imb.</th><th style='text-align:right'>CLOB depth</th><th style='text-align:right'>Smart $</th><th style='text-align:right'>AI div.</th></tr></thead>
   <tbody>{rows}</tbody>
 </table>
 """
@@ -879,6 +943,9 @@ def write_dashboard(state: Dict[str, Any]) -> None:
   <h3>Binance external signal — last run</h3>
   {_render_binance_section(state.get('binance_last_run') or {})}
 
+  <h3>Flow signal — last run</h3>
+  {_render_flow_section(state.get('flow_last_run') or {})}
+
   <h3>Market Intelligence — last run classification counts</h3>
   <div style="margin-bottom:12px">{mi_run_txt}</div>
 
@@ -1006,6 +1073,26 @@ def main() -> int:
     except Exception as exc:
         print(f"[{utc_now()}] binance: fetch failed ({exc}) — internal model only", flush=True)
 
+    # Initialize CLOB client for flow/whale signal (re-used across markets this cycle).
+    clob_client: Optional[CLOBClient] = None
+    try:
+        clob_client = CLOBClient()
+    except Exception as exc:
+        print(f"[{utc_now()}] clob: init failed ({exc}) — flow signal disabled", flush=True)
+
+    # Fetch PolymarketScan analytics once per cycle (smart money + AI divergence).
+    scan_data: Optional[ScanData] = None
+    try:
+        scan_data = fetch_scan_data()
+        n_markets = len(scan_data.markets_by_slug)
+        n_ai = len(scan_data.ai_diverge_by_slug)
+        if n_markets or n_ai:
+            print(f"[{utc_now()}] scan: fetched {n_markets} markets, {n_ai} ai-vs-humans", flush=True)
+    except Exception as exc:
+        print(f"[{utc_now()}] scan: fetch failed ({exc}) — orderbook-only flow", flush=True)
+
+    flow_snap = FlowSnapshot.empty()
+
     # Circuit breaker: multi-condition. Always allows closing open positions.
     _cb_consec   = int(state.get("consecutive_losses", 0))
     _cb_drawdown = float(state.get("realized_pnl", 0.0))
@@ -1052,6 +1139,18 @@ def main() -> int:
         if binance_snap is not None:
             p_binance = compute_binance_signal(m, binance_snap, SIGNAL_CFG)
             p_hat = blend_p_hat(p_hat, p_binance, SIGNAL_CFG)
+
+        # Blend with flow/whale signal (orderbook imbalance + PolymarketScan).
+        flow_res = compute_flow_signal(m, clob_client=clob_client, scan_data=scan_data, cfg=FLOW_CFG)
+        if flow_res.adj != 0.0:
+            p_hat = max(0.01, min(0.99, p_hat + flow_res.adj))
+            flow_snap.record(
+                market_id, flow_res.adj,
+                tob_imb=flow_res.tob_imb,
+                clob_imb=flow_res.clob_imb,
+                smart_money=flow_res.smart_money,
+                ai_diverge=flow_res.ai_diverge,
+            )
 
         # ── Market Intelligence pre-filter ──────────────────────────────────
         # Classify market structure BEFORE edge evaluation.
@@ -1123,7 +1222,7 @@ def main() -> int:
             except Exception:
                 bb_f, ba_f = None, None
 
-            # Spread filter
+            # Spread filter (absolute + relative)
             spread = None
             if bb_f is not None and ba_f is not None:
                 spread = ba_f - bb_f
@@ -1131,6 +1230,15 @@ def main() -> int:
                 if spread > float(TRADER_CFG["MAX_SPREAD"]):
                     state["spread_skips"] = int(state.get("spread_skips", 0)) + 1
                     print(f"Skipped market due to large spread: {market_id} spread={spread:.4f}")
+                    continue
+                # Relative spread guard: at low prices even a small absolute
+                # spread can eat all edge (e.g. 0.01 on 0.09 = ~12 %).
+                mid = (bb_f + ba_f) / 2.0
+                max_rel = float(TRADER_CFG["MAX_RELATIVE_SPREAD"])
+                if mid > 0 and (spread / mid) > max_rel:
+                    state["spread_skips"] = int(state.get("spread_skips", 0)) + 1
+                    print(f"Skipped market due to high relative spread: {market_id} "
+                          f"spread={spread:.4f} mid={mid:.4f} rel={spread/mid:.2%}")
                     continue
 
             # Liquidity filter (best sizes)
@@ -1161,8 +1269,15 @@ def main() -> int:
             if quality < float(TRADER_CFG["MIN_MARKET_QUALITY_SCORE"]):
                 continue
 
-            # Decide entry based on the edge at the *actual* entry price
-            enter_th = max(float(TRADER_CFG["EDGE_ENTER"]), th)
+            # Decide entry based on the edge at the *actual* entry price.
+            # Net-edge filter: edge must exceed execution costs to be profitable.
+            # edge = p_hat − ask.  On exit we get bid ≈ p_hat − spread/2.
+            # Round-trip cost from edge perspective ≈ spread/2 + fees.
+            half_spread = (spread or 0.0) / 2.0
+            fee_side = float(TRADER_CFG["FEE_PER_SIDE"])
+            safety = float(TRADER_CFG["SAFETY_MARGIN"])
+            min_edge_exec = half_spread + fee_side + safety
+            enter_th = max(float(TRADER_CFG["EDGE_ENTER"]), th, min_edge_exec)
 
             if edge_yes >= enter_th:
                 pr = compute_priority_score(edge=edge_yes, quality=quality)
@@ -1267,6 +1382,15 @@ def main() -> int:
             "errors": {},
         }
 
+    # Persist flow signal snapshot for the dashboard (always, even when empty,
+    # so the dashboard shows "no signals this cycle" instead of stale data).
+    state["flow_last_run"] = {
+        "fetched_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(flow_snap.fetched_at)
+        ),
+        "signals": flow_snap.signals,
+    }
+
     _prune_state(state)
     save_state(state)
     write_dashboard(state)
@@ -1286,9 +1410,15 @@ def main() -> int:
             sign = "+" if (ret or 0.0) >= 0 else ""
             parts.append(f"{asset}=${sn.current_price:.0f}({sign}{(ret or 0.0)*100:.1f}%)")
         binance_str = " binance=[" + " ".join(parts) + "]"
+    flow_str = ""
+    if flow_snap.signals:
+        flow_str = f" flow={len(flow_snap.signals)}"
+    scan_str = ""
+    if scan_data is not None:
+        scan_str = f" scan(mkts={len(scan_data.markets_by_slug)},ai={len(scan_data.ai_diverge_by_slug)})"
     print(
         f"[{end_ts}] trader: done market_scan(seen={total_seen}, kept={total_kept}) "
-        f"positions={n_positions} trades={n_trades} mi=[{mi_summary}]{binance_str}",
+        f"positions={n_positions} trades={n_trades} mi=[{mi_summary}]{binance_str}{flow_str}{scan_str}",
         flush=True,
     )
     return 0

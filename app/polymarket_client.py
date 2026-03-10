@@ -9,6 +9,7 @@ Base URL: https://gamma-api.polymarket.com
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -89,6 +90,11 @@ class GammaClient:
         raise GammaAPIError(f"Unexpected /markets response shape: {type(data)}")
 
 
+_CRYPTO_RE = re.compile(
+    r"\b(?:bitcoin|btc|ethereum|eth|solana|sol)\b", re.IGNORECASE
+)
+
+
 def is_up_or_down_crypto_market(m: Dict[str, Any]) -> bool:
     """Heuristic filter for crypto 'Up or Down' markets.
 
@@ -109,8 +115,9 @@ def is_up_or_down_crypto_market(m: Dict[str, Any]) -> bool:
     if "up or down" not in text and ("will" not in text or "up" not in text or "down" not in text):
         return False
 
-    # crypto tickers/names of interest
-    crypto_hits = any(x in text for x in ("bitcoin", "btc", "ethereum", "eth", "solana", "sol", "\nsol\n"))
+    # crypto tickers/names of interest — use word-boundary matching
+    # to avoid false positives like "resolution" → "sol", "whether" → "eth"
+    crypto_hits = bool(_CRYPTO_RE.search(text))
     if not crypto_hits:
         return False
 

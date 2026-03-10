@@ -46,7 +46,7 @@ class MispricingConfig:
 
     # Warmstart: allow p_hat estimation with fewer than sma_window points
     warmstart_min_points: int = 3
-    warmstart_edge_scale: float = 2.0  # require larger edge early (edge_enter * scale)
+    warmstart_edge_scale: float = 1.5  # require moderately larger edge early (edge_enter * scale)
 
 
 def market_probability_from_midprice(price: float) -> float:
